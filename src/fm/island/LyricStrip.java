@@ -25,7 +25,7 @@ final class LyricStrip extends View {
     private String measuredText;
     private float measuredSize,measuredWidth;
     private float[] advances=new float[0];
-    private boolean motion,karaoke;
+    private boolean karaoke;
     private float scrollOffset,outgoingOffset;
     private boolean reset=true;
     private int whitePrefix;
@@ -66,7 +66,6 @@ final class LyricStrip extends View {
             double predicted=clockAtSample+(now-sampledAt)*(double)rate/next.span;
             clockAtSample=predicted+Math.max(-.025,Math.min(.025,(observed-predicted)*.18));
         }else clockAtSample=observed;
-        motion=settings.prefs.getBoolean("motion",true);
         karaoke=settings.karaokeEnabled();
         reset=false;
         frame=next;
@@ -84,7 +83,7 @@ final class LyricStrip extends View {
         float size=(compact?15:17)*getResources().getDisplayMetrics().scaledDensity;
         float center=getHeight()/2f;
 
-        float phase=motion?Math.min(1,age/260f):1;
+        float phase=Math.min(1,age/260f);
         float shift=(1-phase)*(1-phase)*6*density;
 
         float left=getPaddingLeft(),right=getWidth()-getPaddingRight();
@@ -107,19 +106,20 @@ final class LyricStrip extends View {
         float colored=-1, preview=-1;
         if(frame!=null){
             double position=clockAtSample+(now-sampledAt)*(double)rate/frame.span;
-            progress=Math.max(progress,Math.min(1,position));
+            progress=frame.highlightedPrefix>=0?frame.fraction:Math.max(progress,Math.min(1,position));
             colored=width+2;
             if(karaoke&&frame.cue!=null){
                 long end=frame.cue.end(frame.start+frame.span);
                 long wordPosition=frame.start+(long)(progress*frame.span);
                 whitePrefix=Math.max(whitePrefix,frame.cue.sungPrefix(wordPosition,end));
-                colored=advances[whitePrefix];
-                preview=advances[frame.cue.previewEnd(whitePrefix,settings.previewLetters())];
+                int highlighted=frame.highlightedPrefix>=0?frame.highlightedPrefix:whitePrefix;
+                colored=advances[highlighted];
+                preview=advances[frame.cue.previewEnd(highlighted,settings.previewLetters())];
             }
             // Cover the measured overflow in the cue's duration. Wider lines move faster.
-            if(motion)scrollOffset=Math.min(overflow,Math.max(scrollOffset,(float)(overflow*progress)));
+            scrollOffset=Math.min(overflow,Math.max(scrollOffset,(float)(overflow*progress)));
         }
-        float x=left-(motion?scrollOffset:0);
+        float x=left-scrollOffset;
         if(!compact&&overflow==0)x+=(right-left-width)/2;
         draw(canvas,text,x,center+shift,size,frame==null?accent:UNPLAYED,phase,colored);
         if(preview>colored){

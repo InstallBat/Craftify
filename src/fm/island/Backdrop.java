@@ -9,6 +9,8 @@ import java.io.IOException;
 final class Backdrop extends Drawable {
     private final Bitmap bitmap;
     private final int darkness;
+    private final Path roundedClip=new Path();
+    private int radius;
     private final Paint paint=new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private Backdrop(Bitmap bitmap,int darkness){
@@ -69,12 +71,26 @@ final class Backdrop extends Drawable {
             }
         }
     }
+    void setCornerRadius(int radius){
+        if(this.radius==radius)return;
+        this.radius=radius;
+        onBoundsChange(getBounds());
+        invalidateSelf();
+    }
+    @Override protected void onBoundsChange(Rect bounds){
+        roundedClip.reset();
+        if(radius>0)roundedClip.addRoundRect(bounds.left,bounds.top,bounds.right,bounds.bottom,
+            radius,radius,Path.Direction.CW);
+    }
+    @Override public void getOutline(Outline outline){
+        if(!getBounds().isEmpty())outline.setRoundRect(getBounds(),radius);
+    }
     @Override public void draw(Canvas canvas){
         Rect bounds=getBounds();
         float scale=Math.max(bounds.width()/(float)bitmap.getWidth(),bounds.height()/(float)bitmap.getHeight());
         float w=bitmap.getWidth()*scale,h=bitmap.getHeight()*scale;
         int save=canvas.save();
-        canvas.clipRect(bounds);
+        if(radius>0)canvas.clipPath(roundedClip);else canvas.clipRect(bounds);
         canvas.drawBitmap(bitmap,null,new RectF(bounds.exactCenterX()-w/2,bounds.exactCenterY()-h/2,
             bounds.exactCenterX()+w/2,bounds.exactCenterY()+h/2),paint);
         canvas.drawColor(Color.argb(darkness*255/100,0,0,0));

@@ -6,6 +6,7 @@ import android.content.res.ColorStateList;
 import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadata;
+import android.media.AudioManager;
 import android.media.session.MediaController;
 import android.media.session.PlaybackState;
 import android.os.*;
@@ -26,12 +27,26 @@ public final class Overlay extends Service {
     private ImageView cover;
     private SeekBar progress;
     private boolean expanded, dragging;
+    private boolean temporarilyHidden;
+    private android.animation.ValueAnimator slide;
+    private final int[] screenPosition=new int[2];
+    private final Runnable returnToScreen=this::showAfterSwipe;
+    private long clockMinute=Long.MIN_VALUE;
+    private String idleTime="";
+    private AudioManager audio;
     private Bitmap art;
     private int tint=IslandVisuals.FALLBACK;
     private LyricStrip lyrics, compactLyrics;
     private IslandVisuals.Pulse pulse;
     private Lyrics currentLyrics;
     private Store store;
+    private Backdrop playerBackdrop;
+    private int backdropGeneration;
+    private final SharedPreferences.OnSharedPreferenceChangeListener backdropListener=(prefs,key)->{
+        if(key==null||key.equals("playerBackdrop")||key.equals("playerBlur")||key.equals("playerDark"))
+            loadPlayerBackdrop();
+
+    };
     private String lyricKey="";
     private final java.util.Map<String,Lyrics> lyricCache=new java.util.HashMap<>();
     private final java.util.concurrent.ExecutorService lyricWorker=java.util.concurrent.Executors.newFixedThreadPool(2);
@@ -43,8 +58,9 @@ public final class Overlay extends Service {
         @Override public void run() {
             if (!Settings.canDrawOverlays(Overlay.this)) { stopSelf(); return; }
             if(sheet!=null){
-                sheet.setVisibility(Main.fullPlayerVisible?View.GONE:View.VISIBLE);
-                if(!Main.fullPlayerVisible)update();
+                boolean visible=!Main.fullPlayerVisible&&!temporarilyHidden;
+                sheet.setVisibility(visible?View.VISIBLE:View.GONE);
+                if(visible)update();
             }
             ui.postDelayed(this,expanded?85:145);
         }
@@ -100,6 +116,15 @@ public final class Overlay extends Service {
         params.x=dp(6)+Math.round(horizontal*availableTravel());
         if(sheet.isAttachedToWindow())windows.updateViewLayout(sheet,params);
     }
+    private void dragHorizontally(int origin,float distance){
+        int range=availableTravel();
+        if(range<=0)return;
+        float target=Math.max(0,Math.min(1,(origin+distance-dp(6))/range));
+        if(target==horizontal)return;
+        horizontal=target;
+        place();
+    }
+    private void savePosition(){store.prefs.edit().putFloat("overlayPosition",horizontal).apply();}
     private void draggable(View view){
         view.setOnTouchListener(new View.OnTouchListener(){
             private float down;
@@ -111,15 +136,11 @@ public final class Overlay extends Service {
                         down=e.getRawX();origin=params.x;moved=false;return true;
                     case android.view.MotionEvent.ACTION_MOVE:
                         float delta=e.getRawX()-down;
-                        if(Math.abs(delta)>android.view.ViewConfiguration.get(Overlay.this).getScaledTouchSlop())moved=true;
-                        if(moved){
-                            int range=availableTravel();
-                            if(range>0) horizontal=Math.max(0,Math.min(1,(origin+delta-dp(6))/range));
-                            place();
-                        }
+                        if(!expanded&&Math.abs(delta)>android.view.ViewConfiguration.get(Overlay.this).getScaledTouchSlop())moved=true;
+                        if(moved)dragHorizontally(origin,delta);
                         return true;
                     case android.view.MotionEvent.ACTION_UP:
-                        if(moved)new Store(Overlay.this).prefs.edit().putFloat("overlayPosition",horizontal).apply();
+                        if(moved)savePosition();
                         else v.performClick();
                         return true;
                     case android.view.MotionEvent.ACTION_CANCEL:return true;
@@ -133,9 +154,77 @@ public final class Overlay extends Service {
         store=new Store(this);
         windows=getSystemService(WindowManager.class);
         horizontal=new Store(this).prefs.getFloat("overlayPosition",.5f);
-        sheet=column();
+        audio=getSystemService(AudioManager.class);
+        sheet=new LinearLayout(this){
+            private static final int HORIZONTAL=1,VERTICAL=2;
+            private float downX,downY,originalPosition,furthest;
+            private int gesture,volumeAtDown,dragOrigin,direction;
+            private boolean detect;
+
+            @Override public boolean dispatchTouchEvent(MotionEvent event){
+                if(slide!=null)return true;
+                int action=event.getActionMasked();
+                if(action==MotionEvent.ACTION_DOWN){
+                    detect=expanded&&!onSeekBar(event);
+                    originalPosition=horizontal;
+                    dragOrigin=params.x;
+                    furthest=0;
+                    gesture=0;
+                    downX=event.getRawX();
+                    downY=event.getRawY();
+                    if(detect)volumeAtDown=audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+                }
+                if(detect&&(action==MotionEvent.ACTION_MOVE||action==MotionEvent.ACTION_UP)){
+                    float dx=event.getRawX()-downX,dy=event.getRawY()-downY;
+                    int threshold=Math.max(dp(18),ViewConfiguration.get(Overlay.this).getScaledTouchSlop());
+                    if(gesture==0&&Math.max(Math.abs(dx),Math.abs(dy))>=threshold){
+                        gesture=Math.abs(dx)>Math.abs(dy)?HORIZONTAL:VERTICAL;
+                        direction=dx<0?-1:1;
+                        dragging=false;
+                        MotionEvent cancel=MotionEvent.obtain(event);
+                        cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        super.dispatchTouchEvent(cancel);
+                        cancel.recycle();
+                    }
+                    if(gesture==VERTICAL){
+                        int max=audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                        int steps=(int)(Math.abs(dy)/threshold);
+                        int volume=Math.max(0,Math.min(max,volumeAtDown+(dy<0?steps:-steps)));
+                        if(volume!=audio.getStreamVolume(AudioManager.STREAM_MUSIC))
+                            audio.setStreamVolume(AudioManager.STREAM_MUSIC,volume,0);
+                    }
+                    if(gesture==HORIZONTAL){
+                        float distance=dx*direction;
+                        furthest=Math.max(furthest,distance);
+                        boolean reversed=furthest>=dp(26)&&furthest-distance>=dp(32);
+                        if(action==MotionEvent.ACTION_UP&&reversed){
+                            horizontal=originalPosition;
+                            place();
+                            hideAfterSwipe();
+                        }else{
+                            dragHorizontally(dragOrigin,dx);
+                            if(action==MotionEvent.ACTION_UP)savePosition();
+                        }
+                    }
+                    if(gesture!=0)return true;
+                }
+                if(action==MotionEvent.ACTION_CANCEL&&gesture==HORIZONTAL){
+                    horizontal=originalPosition;
+                    place();
+                }
+                return super.dispatchTouchEvent(event)||detect;
+            }
+
+            private boolean onSeekBar(MotionEvent event){
+                if(progress==null||!progress.isEnabled())return false;
+                progress.getLocationOnScreen(screenPosition);
+                float x=event.getRawX()-screenPosition[0],y=event.getRawY()-screenPosition[1];
+                return x>=0&&x<progress.getWidth()&&y>=0&&y<progress.getHeight();
+            }
+        };
+        sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setPadding(dp(8),dp(8),dp(8),dp(8));
-        sheet.setBackground(IslandVisuals.glass(tint,dp(29),false));
+        updateBackground();
         sheet.setElevation(dp(10));
         LinearLayout header=row();sheet.addView(header);
         cover=new ImageView(this);cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -166,6 +255,7 @@ public final class Overlay extends Service {
             @Override public void onProgressChanged(SeekBar b,int p,boolean user) {}
             @Override public void onStartTrackingTouch(SeekBar b) {dragging=true;}
             @Override public void onStopTrackingTouch(SeekBar b) {
+                if(!dragging)return;
                 long ms=duration*b.getProgress()/1000;
                 compactLyrics.resetProgress();lyrics.resetProgress();
                 if(remote!=null) remote.getTransportControls().seekTo(ms);
@@ -184,12 +274,93 @@ public final class Overlay extends Service {
         }));
 
         params=new WindowManager.LayoutParams(width(false),-2,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL |
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
         params.gravity=Gravity.TOP|Gravity.LEFT;
         params.y=dp(8);
         place();windows.addView(sheet,params);
         draggable(cover);draggable(content);draggable(pulse);draggable(names);
+        store.prefs.registerOnSharedPreferenceChangeListener(backdropListener);
+        loadPlayerBackdrop();
+    }
+
+    private void hideAfterSwipe(){
+
+        sheet.getLocationOnScreen(screenPosition);
+        int bottom=screenPosition[1]+sheet.getHeight();
+        animateSlide(params.y-bottom-dp(2),false,this::waitOffscreen);
+    }
+
+    private void waitOffscreen(){
+        temporarilyHidden=true;
+        sheet.setVisibility(View.GONE);
+        ui.postDelayed(returnToScreen,7000);
+    }
+
+    private void showAfterSwipe(){
+        temporarilyHidden=false;
+        int restY=dp(8);
+        if(Main.fullPlayerVisible){
+            setWindowY(restY);
+            return;
+        }
+
+        sheet.setVisibility(View.VISIBLE);
+        animateSlide(restY,true,()->{});
+    }
+
+    private void setWindowY(int y){
+        if(params.y==y)return;
+        params.y=y;
+        if(sheet.isAttachedToWindow())windows.updateViewLayout(sheet,params);
+    }
+
+    private void animateSlide(int target,boolean entering,Runnable done){
+        android.animation.ValueAnimator animation=android.animation.ValueAnimator.ofInt(params.y,target);
+        slide=animation;
+        animation.setDuration(entering?360:280);
+        animation.setInterpolator(entering
+            ?new android.view.animation.PathInterpolator(.16f,1f,.3f,1f)
+            :new android.view.animation.PathInterpolator(.4f,0f,1f,1f));
+        animation.addUpdateListener(value->setWindowY((int)value.getAnimatedValue()));
+        animation.addListener(new android.animation.AnimatorListenerAdapter(){
+            @Override public void onAnimationEnd(android.animation.Animator ended){
+                if(slide!=animation)return;
+                slide=null;
+                done.run();
+            }
+        });
+        animation.start();
+    }
+
+    private void updateBackground(){
+        int radius=dp(expanded?33:29);
+        if(playerBackdrop==null){
+            sheet.setBackground(IslandVisuals.glass(tint,radius,expanded));
+        }else{
+            playerBackdrop.setCornerRadius(radius);
+            sheet.setBackground(playerBackdrop);
+        }
+    }
+
+    private void loadPlayerBackdrop(){
+        int generation=++backdropGeneration;
+        String uri=store.prefs.getString("playerBackdrop",null);
+        if(uri==null){playerBackdrop=null;updateBackground();return;}
+        int blur=store.prefs.getInt("playerBlur",0);
+        int dark=store.prefs.getInt("playerDark",60);
+        lyricWorker.execute(()->{
+            Backdrop loaded=null;
+            try{loaded=Backdrop.load(this,uri,blur,dark);}
+            catch(java.io.IOException | RuntimeException ignored){}
+            Backdrop image=loaded;
+            ui.post(()->{
+                if(generation!=backdropGeneration)return;
+                playerBackdrop=image;
+                updateBackground();
+            });
+        });
     }
 
     private void openFullPlayer(){
@@ -205,7 +376,7 @@ public final class Overlay extends Service {
         if(resize!=null)resize.cancel();
         detail.setImageResource(expanded?R.drawable.ic_up:R.drawable.ic_down);detail.setContentDescription(expanded?"Свернуть":"Развернуть");
         detail.setVisibility(expanded?View.VISIBLE:View.GONE);
-        sheet.setBackground(IslandVisuals.glass(tint,dp(expanded?33:29),expanded));
+        updateBackground();
         if(expanded){
             panel.setVisibility(View.VISIBLE);panel.setAlpha(0f);
             panel.setTranslationY(-dp(6));panel.animate().alpha(1).translationY(0).setDuration(220).start();
@@ -214,11 +385,7 @@ public final class Overlay extends Service {
                 if(!expanded)panel.setVisibility(View.GONE);
             }).start();
         }
-        if(!new Store(this).prefs.getBoolean("motion",true)){
-            panel.animate().cancel();panel.setAlpha(1f);panel.setTranslationY(0f);
-            panel.setVisibility(expanded?View.VISIBLE:View.GONE);
-            params.width=width(expanded);place();update();return;
-        }
+
         resize=android.animation.ValueAnimator.ofInt(params.width,width(expanded));
         resize.setDuration(260);
         resize.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
@@ -288,23 +455,24 @@ public final class Overlay extends Service {
         }
         String key=track.isEmpty()?"":(local!=null?local.track().key():remote.getPackageName())+"\n"+track+"\n"+artist;
         findLyrics(key,track,artist,duration);
-        Lyrics.Frame frame=currentLyrics==null?null:currentLyrics.frame(position,duration);
+        Lyrics.Frame frame=currentLyrics==null?null:currentLyrics.frame(position,duration,store.karaokeEnabled()?store.karaokeLead():0);
         if(image!=art){
             art=image;tint=IslandVisuals.accent(art);
-            sheet.setBackground(IslandVisuals.glass(tint,dp(expanded?33:29),expanded));
+            updateBackground();
             ((IslandVisuals.Dots)progress).tint=tint;
             cover.animate().cancel();cover.setAlpha(.5f);
             if(art==null)cover.setImageResource(R.drawable.island);else cover.setImageBitmap(art);
             cover.animate().alpha(1).setDuration(180).start();
         }
-        boolean showLine=!expanded && frame!=null;
+        String timeOfDay=isPlaying?"":idleClock();
+        boolean showLine=isPlaying&&!expanded&&frame!=null;
         compactLyrics.setVisibility(showLine?View.VISIBLE:View.INVISIBLE);
         float speed=isPlaying?(state==null?1:state.getPlaybackSpeed()):0;
         compactLyrics.display(frame,"",TEXT,speed);
         title.setVisibility(showLine?View.INVISIBLE:View.VISIBLE);
         subtitle.setVisibility(showLine?View.INVISIBLE:View.VISIBLE);
-        title.setText(track.isEmpty()?"Craftify":track);
-        subtitle.setText(artist.isEmpty()?(track.isEmpty()?"Нет активного трека":"Сейчас играет"):artist);
+        title.setText(track.isEmpty()?timeOfDay:track);
+        subtitle.setText(!isPlaying?(track.isEmpty()?"Нет активного трека":timeOfDay):artist.isEmpty()?"Сейчас играет":artist);
         lyrics.display(frame,track.isEmpty()?"Нет активного трека":"",TEXT,speed);
         lyrics.setVisibility(frame==null?View.GONE:View.VISIBLE);
         pulse.display(isPlaying,tint);
@@ -316,7 +484,15 @@ public final class Overlay extends Service {
         progress.setEnabled(duration>0 && (local!=null || (actions & PlaybackState.ACTION_SEEK_TO)!=0));
         position=Math.max(0,duration>0?Math.min(position,duration):position);
         if(!dragging)progress.setProgress(duration>0?(int)(1000*position/duration):0);
-        clock.setText(format(position)+"  /  "+format(duration));
+        clock.setText(isPlaying?format(position)+"  /  "+format(duration):timeOfDay);
+    }
+    private String idleClock(){
+        long now=System.currentTimeMillis();
+        if(clockMinute!=now/60000){
+            clockMinute=now/60000;
+            idleTime=android.text.format.DateFormat.getTimeFormat(this).format(new java.util.Date(now));
+        }
+        return idleTime;
     }
     private String format(long ms){long s=ms/1000;return String.format(java.util.Locale.ROOT,"%d:%02d",s/60,s%60);}
     private void toggle(){
@@ -334,7 +510,14 @@ public final class Overlay extends Service {
     }
     @Override public IBinder onBind(Intent i){return null;}
     @Override public void onDestroy(){
+        backdropGeneration++;
+        if(store!=null)store.prefs.unregisterOnSharedPreferenceChangeListener(backdropListener);
         ui.removeCallbacksAndMessages(null);
+        if(slide!=null){
+            android.animation.ValueAnimator animation=slide;
+            slide=null;
+            animation.cancel();
+        }
         lyricWorker.shutdownNow();if(resize!=null)resize.cancel();
         if(sheet!=null && sheet.isAttachedToWindow())windows.removeView(sheet);
         sheet=null;

@@ -19,7 +19,7 @@ if (!(Test-Path $aar)) {
 }
 Run tar.exe @('-xf',$aar,'-C',"$build\vlc")
 Run "$tools\aapt2.exe" @('compile','--dir',"$PSScriptRoot\res",'-o',"$build\resources.zip")
-Run "$tools\aapt2.exe" @('link','-I',$android,'--manifest',"$PSScriptRoot\AndroidManifest.xml",'--java',"$build\generated",'--version-code','18','--version-name','1.17','-o',"$build\unsigned.apk","$build\resources.zip")
+Run "$tools\aapt2.exe" @('link','-I',$android,'--manifest',"$PSScriptRoot\AndroidManifest.xml",'--java',"$build\generated",'--version-code','31','--version-name','1.30','-o',"$build\unsigned.apk","$build\resources.zip")
 $sources = @(Get-ChildItem "$PSScriptRoot\src","$build\generated" -Recurse -Filter '*.java' | ForEach-Object FullName)
 
 
@@ -48,6 +48,7 @@ if (!(Test-Path $SigningKey)) {
 }
 Run "$tools\apksigner.bat" @('sign','--v4-signing-enabled','false','--ks',$SigningKey,'--ks-pass','pass:android','--out',$Output,"$build\aligned.apk")
 Run "$tools\apksigner.bat" @('verify','--verbose',$Output)
+
 
 
 

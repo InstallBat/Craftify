@@ -131,6 +131,11 @@ final class Lyrics {
         }
         return low-1;
     }
+    static Lyrics manual(String value){return new Lyrics(value,true);}
+    private Lyrics(String value,boolean manual){
+        timeline=Collections.emptyList();
+        text=value;
+    }
     Lyrics(String value) {
         StringBuilder plain=new StringBuilder();
         for(String row:value.split("\\r?\\n")) {
@@ -159,9 +164,44 @@ final class Lyrics {
         final float fraction;
         final long start, span;
         final Cue cue;
+        final int highlightedPrefix;
         Frame(String previous,String current,String next,float fraction,long start,long span,Cue cue) {
+            this(previous,current,next,fraction,start,span,cue,-1);
+        }
+        Frame(String previous,String current,String next,float fraction,long start,long span,Cue cue,int highlightedPrefix){
+            this.highlightedPrefix=highlightedPrefix;
             this.previous=previous;this.current=current;this.next=next;this.fraction=fraction;this.start=start;this.span=span;this.cue=cue;
         }
+    }
+    static final class Highlight {
+        final int line,prefix;
+        Highlight(int line,int prefix){this.line=line;this.prefix=prefix;}
+    }
+    Highlight highlight(long position,long duration,int lead){
+        int line=cueIndex(position);
+        if(line<0)return new Highlight(-1,0);
+        Cue cue=timeline.get(line);
+        long next=line+1<timeline.size()?timeline.get(line+1).start:duration>cue.start?duration:cue.start+4000;
+        int prefix=cue.sungPrefix(position,cue.end(next));
+        if(lead<=0)return new Highlight(line,prefix);
+        int index=Arrays.binarySearch(cue.allLetterEnds,prefix);
+        int count=(index>=0?index+1:-index-1)+lead;
+        while(count>cue.characters&&line+1<timeline.size()){
+            count-=cue.characters;
+            cue=timeline.get(++line);
+        }
+        int highlighted=cue.characters==0?0:cue.allLetterEnds[Math.min(count,cue.characters)-1];
+        return new Highlight(line,highlighted);
+    }
+    Frame frame(long position,long duration,int lead){
+        if(lead<=0)return frame(position,duration);
+        Highlight highlight=highlight(position,duration,lead);
+        if(highlight.line<0)return null;
+        Cue cue=timeline.get(highlight.line);
+        Frame frame=frame(cue.start,duration);
+        if(frame==null)return null;
+        return new Frame(frame.previous,frame.current,frame.next,
+            highlight.prefix/(float)cue.text.length(),frame.start,frame.span,cue,highlight.prefix);
     }
     Frame frame(long position,long duration) {
         Map.Entry<Long,String> current=lines.floorEntry(position);

@@ -41,8 +41,46 @@ public final class Player extends Service {
             handler.postDelayed(this,1000);
         }
     };
+    private final Set<Integer> connectedOutputs=new HashSet<>();
+    private final AudioDeviceCallback audioDevices=new AudioDeviceCallback(){
+        @Override public void onAudioDevicesAdded(AudioDeviceInfo[] devices){
+            boolean added=false;
+            for(AudioDeviceInfo device:devices){
+                if(isExternalOutput(device)&&connectedOutputs.add(device.getId()))added=true;
+            }
+            if(added&&settings.prefs.getBoolean(Store.PAUSE_ON_CONNECT,false))pause();
+        }
+        @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] devices){
+            boolean removed=false;
+            for(AudioDeviceInfo device:devices){
+                if(connectedOutputs.remove(device.getId()))removed=true;
+            }
+            if(removed&&settings.prefs.getBoolean(Store.PAUSE_ON_DISCONNECT,true))pause();
+        }
+    };
+    private static boolean isExternalOutput(AudioDeviceInfo device){
+        if(!device.isSink())return false;
+        switch(device.getType()){
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_BLE_HEADSET:
+            case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_USB_DEVICE:
+            case AudioDeviceInfo.TYPE_USB_ACCESSORY:
+            case AudioDeviceInfo.TYPE_LINE_ANALOG:
+            case AudioDeviceInfo.TYPE_LINE_DIGITAL:
+            case AudioDeviceInfo.TYPE_HEARING_AID:
+                return true;
+            default:return false;
+        }
+    }
     private final BroadcastReceiver unplug=new BroadcastReceiver() {
-        @Override public void onReceive(Context c,Intent i) { pause(); }
+        @Override public void onReceive(Context c,Intent i) {
+            if(settings.prefs.getBoolean(Store.PAUSE_ON_DISCONNECT,true))pause();
+        }
     };
     @Override public void onCreate() {
         super.onCreate();
@@ -72,6 +110,10 @@ public final class Player extends Service {
         });
         session.setSessionActivity(activity());
         session.setActive(true);
+        for(AudioDeviceInfo device:audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)){
+            if(isExternalOutput(device))connectedOutputs.add(device.getId());
+        }
+        audio.registerAudioDeviceCallback(audioDevices,handler);
         handler.post(tick);
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
@@ -103,6 +145,20 @@ public final class Player extends Service {
         List<Track> result=new ArrayList<>();
         for(int item:order)result.add(queue.get(item));
         return result;
+    }
+    void removeTrack(String key){
+        Track current=track();
+        List<Track> remaining=new ArrayList<>(queue);
+        if(!remaining.removeIf(item->item.key().equals(key)))return;
+        queue=remaining;
+        if(current!=null&&current.key().equals(key)){
+            index=-1;
+            releaseEngine();
+            stopSelf();
+        }else{
+            index=queue.indexOf(current);
+            buildOrder(index);
+        }
     }
     void playQueueItem(int position){if(position>=0&&position<order.size())load(order.get(position));}
     boolean shuffled(){return shuffled;}
@@ -249,6 +305,7 @@ public final class Player extends Service {
     @Override public android.os.IBinder onBind(Intent i){return null;}
     @Override public void onDestroy(){
         handler.removeCallbacksAndMessages(null);
+        audio.unregisterAudioDeviceCallback(audioDevices);
         unregisterReceiver(unplug);
         releaseEngine();
         if(library!=null) library.release();

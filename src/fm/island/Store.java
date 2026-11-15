@@ -8,8 +8,12 @@ import java.util.*;
 final class Store {
     static final String[] LYRIC_SOURCES={"LRCLIB","Deezer","NetEase","QQ Music","Kugou","Paxsenix"};
     static final int ALL_LYRIC_SOURCES=(1<<LYRIC_SOURCES.length)-1;
+    static final String PAUSE_ON_DISCONNECT="pauseOnAudioDisconnect";
+    static final String PAUSE_ON_CONNECT="pauseOnAudioConnect";
     final SharedPreferences prefs;
-    int previewLetters(){return prefs.getInt("previewLetters",5);}
+    int karaokeLead(){return prefs.getInt("karaokeLead",0);}
+    int previewLetters(){return prefs.getInt("previewLetters",1);}
+    int subtitleSize(){return prefs.getInt("subtitleSize",29);}
     boolean karaokeEnabled(){return prefs.getBoolean("karaokeEnabled",false);}
     void setKaraokeEnabled(boolean enabled){prefs.edit().putBoolean("karaokeEnabled",enabled).apply();}
     int lyricSources(){return prefs.getInt("lyricSources",ALL_LYRIC_SOURCES);}
@@ -19,6 +23,22 @@ final class Store {
         Set<String> values=set(list);
         if (!values.remove(track)) values.add(track);
         prefs.edit().putStringSet(list,values).apply();
+    }
+    void remove(String list,String track) {
+        Set<String> values=set(list);
+        if(values.remove(track))prefs.edit().putStringSet(list,values).apply();
+    }
+    void removeTrack(String track) {
+        SharedPreferences.Editor edit=prefs.edit();
+        List<String> keys=new ArrayList<>(Arrays.asList("favorites","imports"));
+        for(String name:lists())keys.add("list:"+name);
+        for(String key:keys){
+            Set<String> values=set(key);
+            if(values.remove(track))edit.putStringSet(key,values);
+        }
+        JSONObject history=stats();
+        history.remove(track);
+        edit.putString("stats",history.toString()).remove("manualLyrics:"+track).apply();
     }
     void add(String list, String track) {
         Set<String> values=set(list);
